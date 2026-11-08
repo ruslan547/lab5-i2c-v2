@@ -1,4 +1,4 @@
-# lab5-i2c — BMP180 по шине I2C на STM32F401RE
+# lab5-i2c-v2 — BMP180 по шине I2C на STM32F401RE
 
 Лабораторная работа №5 по курсу «Аппаратно-программное обеспечение БПЛА».
 Программная реализация работы с датчиком давления **BMP180** по интерфейсу
@@ -49,5 +49,5 @@ Repeated START, STOP, ACK/NACK, clock stretching) реализован в `Src/m
 ## Сборка
 
 STM32CubeIDE → `File → Import → Existing Projects into Workspace` →
-каталог `lab5-i2c` → молоточек (Build). Прошивка: `Debug/lab5-i2c.hex`
-(копия — `firmware/lab5-i2c.hex`).
+каталог `lab5-i2c-v2` → молоточек (Build). Прошивка: `Debug/lab5-i2c-v2.hex`
+(копия — `firmware/lab5-i2c-v2.hex`).
