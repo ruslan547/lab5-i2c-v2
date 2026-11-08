@@ -51,3 +51,14 @@ Repeated START, STOP, ACK/NACK, clock stretching) реализован в `Src/m
 STM32CubeIDE → `File → Import → Existing Projects into Workspace` →
 каталог `lab5-i2c-v2` → молоточек (Build). Прошивка: `Debug/lab5-i2c-v2.hex`
 (копия — `firmware/lab5-i2c-v2.hex`).
+
+## Диагностика
+
+При ошибке обмена во второй строке ЖКИ выводится причина:
+
+| Сообщение | Значение |
+|---|---|
+| `I2C err NACK b1` | датчик не ответил на свой адрес (нет датчика / не та линия) |
+| `I2C err NACK b2`, `b3` | не подтверждён номер регистра / адрес чтения или данные |
+| `I2C err SCL=0` | линия SCL удерживается в нуле (замыкание, нет подтяжки) |
+| `I2C err SDA=0` | перед START линия SDA занята |

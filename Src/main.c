@@ -85,6 +85,14 @@
 // число итераций цикла задержки на полупериод SCL
 static uint32_t i2c_loops = 1;
 
+// причина последней ошибки обмена (выводится на ЖКИ)
+#define I2C_E_SCL         1   // ведомый держит SCL в нуле
+#define I2C_E_SDA         2   // перед START линия SDA занята
+#define I2C_E_NACK        3   // ведомый не подтвердил байт
+static uint8_t i2c_err;
+// номер переданного в транзакции байта: 1 – адрес, 2 – регистр...
+static uint8_t i2c_byte;
+
 // калибровочные коэффициенты BMP180
 static struct {
     int16_t  AC1, AC2, AC3;
@@ -127,10 +135,17 @@ int main(void)
     LCD_send_string("I2C OK!");
 
     // 1. Проверка идентификатора датчика
+    // (до 3 попыток: первая посылка после запуска может
+    // совпасть с переходными процессами на линиях)
     LCD_pos(2, 1);
-    if (I2C_ReadByte(BMP180_ADDR, BMP180_CHIP_ID, &id) != I2C_OK) {
-        LCD_show_error();
-        while (1) {}
+    for (uint8_t try = 0; ; try++) {
+        if (I2C_ReadByte(BMP180_ADDR, BMP180_CHIP_ID, &id) == I2C_OK)
+            break;
+        if (try >= 2U) {
+            LCD_show_error();
+            while (1) {}
+        }
+        delay_ms(10);
     }
     if (id != BMP180_ID_VALUE) {
         LCD_send_string("BMP180 ID ERR ");
@@ -199,7 +214,9 @@ static uint8_t I2C_SCL_Release(void)
 
     SCL_H();
     while (!SCL_IN() && --timeout) {};
-    return timeout ? I2C_OK : I2C_ERR;
+    if (timeout) return I2C_OK;
+    i2c_err = I2C_E_SCL;
+    return I2C_ERR;
 }
 
 // Настройка вывода: выход «открытый сток», высокая скорость,
@@ -227,16 +244,23 @@ static uint8_t I2C_Start(void)
     I2C_Delay();
     if (I2C_SCL_Release() != I2C_OK) return I2C_ERR;
     I2C_Delay();
-    if (!SDA_IN()) return I2C_ERR;  // линию SDA держит другое устройство
+    if (!SDA_IN()) {                // линию SDA держит другое устройство
+        i2c_err = I2C_E_SDA;
+        return I2C_ERR;
+    }
     SDA_L();
     I2C_Delay();
     SCL_L();
     return I2C_OK;
 }
 
-// Условие STOP: подъём SDA при SCL = 1
+// Условие STOP: подъём SDA при SCL = 1.
+// SDA меняется только при SCL = 0, иначе спад SDA при
+// отпущенной SCL был бы воспринят как лишнее условие START
 static void I2C_Stop(void)
 {
+    SCL_L();
+    I2C_Delay();
     SDA_L();
     I2C_Delay();
     I2C_SCL_Release();
@@ -266,6 +290,8 @@ static uint8_t I2C_TxByte(uint8_t byte)
     I2C_Delay();
     ack = SDA_IN() ? I2C_ERR : I2C_OK;
     SCL_L();
+    i2c_byte++;
+    if (ack != I2C_OK) i2c_err = I2C_E_NACK;
     return ack;
 }
 
@@ -333,6 +359,7 @@ void I2C_Init(void)
 //=============================================================
 uint8_t I2C_ReadByte(uint8_t dev_addr, uint8_t reg, uint8_t *data)
 {
+    i2c_byte = 0;
     // 1. START + адрес устройства (Write);
     //    0xFE = 11111110 – обнуление бита R/W
     if (I2C_Start() != I2C_OK)                     goto error;
@@ -359,6 +386,7 @@ error:
 //=============================================================
 uint8_t I2C_WriteByte(uint8_t dev_addr, uint8_t reg, uint8_t value)
 {
+    i2c_byte = 0;
     if (I2C_Start() != I2C_OK)                     goto error;
     if (I2C_TxByte((dev_addr << 1) & 0xFE) != I2C_OK) goto error;
     if (I2C_TxByte(reg) != I2C_OK)                 goto error;
@@ -503,8 +531,19 @@ static void LCD_print_hex(uint8_t value)
     LCD_send_char("0123456789ABCDEF"[value & 0x0F]);
 }
 
+// Строка 2: причина ошибки, например "I2C err NACK b1"
+// (b1 – байт адреса, b2 – номер регистра, b3 – адрес чтения
+// или данные записи), "I2C err SCL=0" или "I2C err SDA=0"
 static void LCD_show_error(void)
 {
     LCD_pos(2, 1);
-    LCD_send_string("I2C error!      ");
+    LCD_send_string("I2C err ");
+    if (i2c_err == I2C_E_NACK) {
+        LCD_send_string("NACK b");
+        LCD_send_char((char)('0' + i2c_byte));
+        LCD_send_char(' ');
+    }
+    else if (i2c_err == I2C_E_SCL) LCD_send_string("SCL=0   ");
+    else if (i2c_err == I2C_E_SDA) LCD_send_string("SDA=0   ");
+    else                           LCD_send_string("        ");
 }
