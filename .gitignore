@@ -1,0 +1,19 @@
+# --- Артефакты сборки STM32CubeIDE ---
+Debug/
+Release/
+*.o
+*.d
+*.su
+*.elf
+*.map
+*.bin
+*.list
+
+# --- Служебные файлы Eclipse / CDT ---
+.settings/language.settings.xml
+.metadata/
+*.launch
+
+# --- Системные файлы macOS / Windows ---
+.DS_Store
+Thumbs.db
