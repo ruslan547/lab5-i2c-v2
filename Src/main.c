@@ -32,19 +32,13 @@
 #define SDA_PORT_EN     RCC_AHB1ENR_GPIOCEN
 #define SDA_PIN         9U              // PC9 – SDA
 
-// Эмуляция открытого стока сменой направления вывода:
-// 1 – вывод переключается на вход, линию поднимает резистор;
-// 0 – вывод переключается на выход, в ODR заранее записан 0.
-// Единица никогда не выдаётся активно, поэтому конфликт с
-// ведомым, прижимающим линию (ACK, данные, clock stretching),
-// невозможен даже в моделях, где OTYPER не учитывается.
-#define PIN_IN(port, pin)   CLEAR_BIT((port)->MODER, 3UL << ((pin) * 2U))
-#define PIN_OUT(port, pin)  MODIFY_REG((port)->MODER, 3UL << ((pin) * 2U), \
-                                       1UL << ((pin) * 2U))
-#define SCL_H()   PIN_IN(SCL_PORT, SCL_PIN)
-#define SCL_L()   PIN_OUT(SCL_PORT, SCL_PIN)
-#define SDA_H()   PIN_IN(SDA_PORT, SDA_PIN)
-#define SDA_L()   PIN_OUT(SDA_PORT, SDA_PIN)
+// Открытый сток: запись 1 отпускает линию (её поднимает
+// резистор), запись 0 прижимает линию к общему проводу.
+// Регистр BSRR позволяет менять один вывод атомарно.
+#define SCL_H()   (SCL_PORT->BSRR = (1UL << SCL_PIN))
+#define SCL_L()   (SCL_PORT->BSRR = (1UL << (SCL_PIN + 16U)))
+#define SDA_H()   (SDA_PORT->BSRR = (1UL << SDA_PIN))
+#define SDA_L()   (SDA_PORT->BSRR = (1UL << (SDA_PIN + 16U)))
 #define SCL_IN()  ((SCL_PORT->IDR >> SCL_PIN) & 1UL)
 #define SDA_IN()  ((SDA_PORT->IDR >> SDA_PIN) & 1UL)
 
@@ -58,7 +52,7 @@
 // Такты ядра на обработку одного полупериода SCL вне цикла
 // задержки (вызовы функций, обращения к GPIO). Уточняется по
 // осциллограмме: увеличить, если частота SCL ниже 200 кГц.
-#define I2C_OVERHEAD      60UL
+#define I2C_OVERHEAD      50UL
 // таймаут ожидания отпускания SCL ведомым, циклов
 #define I2C_TIMEOUT       10000UL
 
@@ -90,14 +84,6 @@
 //=============================================================
 // число итераций цикла задержки на полупериод SCL
 static uint32_t i2c_loops = 1;
-
-// причина последней ошибки обмена (выводится на ЖКИ)
-#define I2C_E_SCL         1   // ведомый держит SCL в нуле
-#define I2C_E_SDA         2   // перед START линия SDA занята
-#define I2C_E_NACK        3   // ведомый не подтвердил байт
-static uint8_t i2c_err;
-// номер переданного в транзакции байта: 1 – адрес, 2 – регистр...
-static uint8_t i2c_byte;
 
 // калибровочные коэффициенты BMP180
 static struct {
@@ -141,17 +127,10 @@ int main(void)
     LCD_send_string("I2C OK!");
 
     // 1. Проверка идентификатора датчика
-    // (до 3 попыток: первая посылка после запуска может
-    // совпасть с переходными процессами на линиях)
     LCD_pos(2, 1);
-    for (uint8_t try = 0; ; try++) {
-        if (I2C_ReadByte(BMP180_ADDR, BMP180_CHIP_ID, &id) == I2C_OK)
-            break;
-        if (try >= 2U) {
-            LCD_show_error();
-            while (1) {}
-        }
-        delay_ms(10);
+    if (I2C_ReadByte(BMP180_ADDR, BMP180_CHIP_ID, &id) != I2C_OK) {
+        LCD_show_error();
+        while (1) {}
     }
     if (id != BMP180_ID_VALUE) {
         LCD_send_string("BMP180 ID ERR ");
@@ -202,35 +181,14 @@ int main(void)
 //=============================================================
 // ПРОГРАММНАЯ РЕАЛИЗАЦИЯ ШИНЫ I2C
 //=============================================================
-// Задержка на n итераций. Цикл написан на ассемблере,
+// Задержка на полупериод SCL. Цикл написан на ассемблере,
 // чтобы его длительность не зависела от уровня оптимизации.
-static void I2C_Wait(uint32_t n)
+static void I2C_Delay(void)
 {
-    if (n == 0U) return;
+    uint32_t n = i2c_loops;
     __asm volatile ("1: subs %0, %0, #1 \n"
                     "   bne  1b         \n"
                     : "+r" (n) : : "cc");
-}
-
-// Полупериод SCL
-static void I2C_Delay(void) { I2C_Wait(i2c_loops); }
-// Низкий полупериод SCL делится на две части:
-// удержание (hold) – SDA не меняется сразу после спада SCL,
-// установка (setup) – SDA выставлена до подъёма SCL
-static void I2C_Hold(void)  { I2C_Wait(i2c_loops / 4U); }
-static void I2C_Setup(void) { I2C_Wait(i2c_loops - i2c_loops / 4U); }
-
-// Прижатие SCL с ожиданием фактического спада линии и
-// паузой удержания: SDA можно менять только после неё,
-// иначе изменение SDA при ещё высокой SCL будет воспринято
-// ведомым как ложное условие START или STOP
-static void I2C_SCL_Low(void)
-{
-    uint32_t timeout = I2C_TIMEOUT;
-
-    SCL_L();
-    while (SCL_IN() && --timeout) {};
-    I2C_Hold();
 }
 
 // Отпускание SCL с ожиданием фактического подъёма линии:
@@ -241,32 +199,15 @@ static uint8_t I2C_SCL_Release(void)
 
     SCL_H();
     while (!SCL_IN() && --timeout) {};
-    if (timeout) return I2C_OK;
-    i2c_err = I2C_E_SCL;
-    return I2C_ERR;
+    return timeout ? I2C_OK : I2C_ERR;
 }
 
-// Отпускание SDA с ожиданием фактического подъёма линии.
-// Единицу формирует только резистор подтяжки, и при большой
-// ёмкости линии (подключённые приборы) фронт затягивается:
-// если поднять SCL раньше, ведомый прочитает 0 вместо 1.
-// Если SDA держит ведомый (ACK, данные), ожидание просто
-// завершается по таймауту и ошибкой не считается.
-static void I2C_SDA_Release(void)
-{
-    uint32_t timeout = I2C_TIMEOUT;
-
-    SDA_H();
-    while (!SDA_IN() && --timeout) {};
-}
-
-// Настройка вывода: в ODR записывается 0 (уровень, который
-// появится при переключении на выход), открытый сток, высокая
-// скорость, подтяжка к VDD; исходно вывод – вход (линия отпущена)
+// Настройка вывода: выход «открытый сток», высокая скорость,
+// подтяжка к VDD; в выходной регистр заранее пишется 1,
+// чтобы линия не прижималась при переключении режима
 static void I2C_PinInit(GPIO_TypeDef *port, uint32_t pin)
 {
-    PIN_IN(port, pin);                          // линия отпущена
-    port->BSRR = (1UL << (pin + 16U));          // ODR = 0
+    port->BSRR = (1UL << pin);                  // линия отпущена
     SET_BIT(port->OTYPER, (1UL << pin));        // открытый сток
     MODIFY_REG(port->OSPEEDR,                   // высокая скорость
                (3UL << (pin * 2U)),
@@ -274,34 +215,30 @@ static void I2C_PinInit(GPIO_TypeDef *port, uint32_t pin)
     MODIFY_REG(port->PUPDR,                     // подтяжка к VDD
                (3UL << (pin * 2U)),
                (1UL << (pin * 2U)));
+    MODIFY_REG(port->MODER,                     // режим выхода
+               (3UL << (pin * 2U)),
+               (1UL << (pin * 2U)));
 }
 
-// Условие START (и Repeated START): спад SDA при SCL = 1.
-// Перед вызовом SCL = 0 (после байта) либо шина свободна
+// Условие START (и Repeated START): спад SDA при SCL = 1
 static uint8_t I2C_Start(void)
 {
-    I2C_SDA_Release();
-    I2C_Setup();
+    SDA_H();
+    I2C_Delay();
     if (I2C_SCL_Release() != I2C_OK) return I2C_ERR;
     I2C_Delay();
-    if (!SDA_IN()) {                // линию SDA держит другое устройство
-        i2c_err = I2C_E_SDA;
-        return I2C_ERR;
-    }
+    if (!SDA_IN()) return I2C_ERR;  // линию SDA держит другое устройство
     SDA_L();
     I2C_Delay();
-    I2C_SCL_Low();
+    SCL_L();
     return I2C_OK;
 }
 
-// Условие STOP: подъём SDA при SCL = 1.
-// SDA меняется только при SCL = 0, иначе спад SDA при
-// отпущенной SCL был бы воспринят как лишнее условие START
+// Условие STOP: подъём SDA при SCL = 1
 static void I2C_Stop(void)
 {
-    I2C_SCL_Low();
     SDA_L();
-    I2C_Setup();
+    I2C_Delay();
     I2C_SCL_Release();
     I2C_Delay();
     SDA_H();
@@ -309,30 +246,26 @@ static void I2C_Stop(void)
 }
 
 // Передача байта старшим битом вперёд.
-// Перед вызовом SCL = 0 и пауза удержания выдержана.
 // Возвращает I2C_OK, если ведомый ответил ACK (SDA = 0)
 static uint8_t I2C_TxByte(uint8_t byte)
 {
     uint8_t ack;
 
     for (uint8_t i = 0; i < 8U; i++) {
-        if (byte & 0x80U) I2C_SDA_Release();      // данные при SCL = 0
-        else              SDA_L();
+        if (byte & 0x80U) SDA_H(); else SDA_L();  // данные при SCL = 0
         byte <<= 1;
-        I2C_Setup();
+        I2C_Delay();
         if (I2C_SCL_Release() != I2C_OK) return I2C_ERR;
         I2C_Delay();                              // ведомый читает бит
-        I2C_SCL_Low();
+        SCL_L();
     }
     // девятый такт – бит подтверждения от ведомого
     SDA_H();
-    I2C_Setup();
+    I2C_Delay();
     if (I2C_SCL_Release() != I2C_OK) return I2C_ERR;
     I2C_Delay();
     ack = SDA_IN() ? I2C_ERR : I2C_OK;
-    I2C_SCL_Low();
-    i2c_byte++;
-    if (ack != I2C_OK) i2c_err = I2C_E_NACK;
+    SCL_L();
     return ack;
 }
 
@@ -344,18 +277,18 @@ static uint8_t I2C_RxByte(uint8_t ack, uint8_t *byte)
 
     SDA_H();                                      // SDA отдаётся ведомому
     for (uint8_t i = 0; i < 8U; i++) {
-        I2C_Setup();
+        I2C_Delay();
         if (I2C_SCL_Release() != I2C_OK) return I2C_ERR;
         I2C_Delay();
         data = (uint8_t)((data << 1) | SDA_IN()); // чтение при SCL = 1
-        I2C_SCL_Low();
+        SCL_L();
     }
     // девятый такт – подтверждение от ведущего
-    if (ack) SDA_L(); else I2C_SDA_Release();
-    I2C_Setup();
+    if (ack) SDA_L(); else SDA_H();
+    I2C_Delay();
     if (I2C_SCL_Release() != I2C_OK) return I2C_ERR;
     I2C_Delay();
-    I2C_SCL_Low();
+    SCL_L();
     SDA_H();
     *byte = data;
     return I2C_OK;
@@ -400,7 +333,6 @@ void I2C_Init(void)
 //=============================================================
 uint8_t I2C_ReadByte(uint8_t dev_addr, uint8_t reg, uint8_t *data)
 {
-    i2c_byte = 0;
     // 1. START + адрес устройства (Write);
     //    0xFE = 11111110 – обнуление бита R/W
     if (I2C_Start() != I2C_OK)                     goto error;
@@ -427,7 +359,6 @@ error:
 //=============================================================
 uint8_t I2C_WriteByte(uint8_t dev_addr, uint8_t reg, uint8_t value)
 {
-    i2c_byte = 0;
     if (I2C_Start() != I2C_OK)                     goto error;
     if (I2C_TxByte((dev_addr << 1) & 0xFE) != I2C_OK) goto error;
     if (I2C_TxByte(reg) != I2C_OK)                 goto error;
@@ -572,19 +503,8 @@ static void LCD_print_hex(uint8_t value)
     LCD_send_char("0123456789ABCDEF"[value & 0x0F]);
 }
 
-// Строка 2: причина ошибки, например "I2C err NACK b1"
-// (b1 – байт адреса, b2 – номер регистра, b3 – адрес чтения
-// или данные записи), "I2C err SCL=0" или "I2C err SDA=0"
 static void LCD_show_error(void)
 {
     LCD_pos(2, 1);
-    LCD_send_string("I2C err ");
-    if (i2c_err == I2C_E_NACK) {
-        LCD_send_string("NACK b");
-        LCD_send_char((char)('0' + i2c_byte));
-        LCD_send_char(' ');
-    }
-    else if (i2c_err == I2C_E_SCL) LCD_send_string("SCL=0   ");
-    else if (i2c_err == I2C_E_SDA) LCD_send_string("SDA=0   ");
-    else                           LCD_send_string("        ");
+    LCD_send_string("I2C error!      ");
 }
