@@ -32,13 +32,19 @@
 #define SDA_PORT_EN     RCC_AHB1ENR_GPIOCEN
 #define SDA_PIN         9U              // PC9 – SDA
 
-// Открытый сток: запись 1 отпускает линию (её поднимает
-// резистор), запись 0 прижимает линию к общему проводу.
-// Регистр BSRR позволяет менять один вывод атомарно.
-#define SCL_H()   (SCL_PORT->BSRR = (1UL << SCL_PIN))
-#define SCL_L()   (SCL_PORT->BSRR = (1UL << (SCL_PIN + 16U)))
-#define SDA_H()   (SDA_PORT->BSRR = (1UL << SDA_PIN))
-#define SDA_L()   (SDA_PORT->BSRR = (1UL << (SDA_PIN + 16U)))
+// Эмуляция открытого стока сменой направления вывода:
+// 1 – вывод переключается на вход, линию поднимает резистор;
+// 0 – вывод переключается на выход, в ODR заранее записан 0.
+// Единица никогда не выдаётся активно, поэтому конфликт с
+// ведомым, прижимающим линию (ACK, данные, clock stretching),
+// невозможен даже в моделях, где OTYPER не учитывается.
+#define PIN_IN(port, pin)   CLEAR_BIT((port)->MODER, 3UL << ((pin) * 2U))
+#define PIN_OUT(port, pin)  MODIFY_REG((port)->MODER, 3UL << ((pin) * 2U), \
+                                       1UL << ((pin) * 2U))
+#define SCL_H()   PIN_IN(SCL_PORT, SCL_PIN)
+#define SCL_L()   PIN_OUT(SCL_PORT, SCL_PIN)
+#define SDA_H()   PIN_IN(SDA_PORT, SDA_PIN)
+#define SDA_L()   PIN_OUT(SDA_PORT, SDA_PIN)
 #define SCL_IN()  ((SCL_PORT->IDR >> SCL_PIN) & 1UL)
 #define SDA_IN()  ((SDA_PORT->IDR >> SDA_PIN) & 1UL)
 
@@ -254,20 +260,18 @@ static void I2C_SDA_Release(void)
     while (!SDA_IN() && --timeout) {};
 }
 
-// Настройка вывода: выход «открытый сток», высокая скорость,
-// подтяжка к VDD; в выходной регистр заранее пишется 1,
-// чтобы линия не прижималась при переключении режима
+// Настройка вывода: в ODR записывается 0 (уровень, который
+// появится при переключении на выход), открытый сток, высокая
+// скорость, подтяжка к VDD; исходно вывод – вход (линия отпущена)
 static void I2C_PinInit(GPIO_TypeDef *port, uint32_t pin)
 {
-    port->BSRR = (1UL << pin);                  // линия отпущена
+    PIN_IN(port, pin);                          // линия отпущена
+    port->BSRR = (1UL << (pin + 16U));          // ODR = 0
     SET_BIT(port->OTYPER, (1UL << pin));        // открытый сток
     MODIFY_REG(port->OSPEEDR,                   // высокая скорость
                (3UL << (pin * 2U)),
                (3UL << (pin * 2U)));
     MODIFY_REG(port->PUPDR,                     // подтяжка к VDD
-               (3UL << (pin * 2U)),
-               (1UL << (pin * 2U)));
-    MODIFY_REG(port->MODER,                     // режим выхода
                (3UL << (pin * 2U)),
                (1UL << (pin * 2U)));
 }
