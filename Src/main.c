@@ -240,6 +240,20 @@ static uint8_t I2C_SCL_Release(void)
     return I2C_ERR;
 }
 
+// Отпускание SDA с ожиданием фактического подъёма линии.
+// Единицу формирует только резистор подтяжки, и при большой
+// ёмкости линии (подключённые приборы) фронт затягивается:
+// если поднять SCL раньше, ведомый прочитает 0 вместо 1.
+// Если SDA держит ведомый (ACK, данные), ожидание просто
+// завершается по таймауту и ошибкой не считается.
+static void I2C_SDA_Release(void)
+{
+    uint32_t timeout = I2C_TIMEOUT;
+
+    SDA_H();
+    while (!SDA_IN() && --timeout) {};
+}
+
 // Настройка вывода: выход «открытый сток», высокая скорость,
 // подтяжка к VDD; в выходной регистр заранее пишется 1,
 // чтобы линия не прижималась при переключении режима
@@ -262,7 +276,7 @@ static void I2C_PinInit(GPIO_TypeDef *port, uint32_t pin)
 // Перед вызовом SCL = 0 (после байта) либо шина свободна
 static uint8_t I2C_Start(void)
 {
-    SDA_H();
+    I2C_SDA_Release();
     I2C_Setup();
     if (I2C_SCL_Release() != I2C_OK) return I2C_ERR;
     I2C_Delay();
@@ -298,7 +312,8 @@ static uint8_t I2C_TxByte(uint8_t byte)
     uint8_t ack;
 
     for (uint8_t i = 0; i < 8U; i++) {
-        if (byte & 0x80U) SDA_H(); else SDA_L();  // данные при SCL = 0
+        if (byte & 0x80U) I2C_SDA_Release();      // данные при SCL = 0
+        else              SDA_L();
         byte <<= 1;
         I2C_Setup();
         if (I2C_SCL_Release() != I2C_OK) return I2C_ERR;
@@ -332,7 +347,7 @@ static uint8_t I2C_RxByte(uint8_t ack, uint8_t *byte)
         I2C_SCL_Low();
     }
     // девятый такт – подтверждение от ведущего
-    if (ack) SDA_L(); else SDA_H();
+    if (ack) SDA_L(); else I2C_SDA_Release();
     I2C_Setup();
     if (I2C_SCL_Release() != I2C_OK) return I2C_ERR;
     I2C_Delay();
